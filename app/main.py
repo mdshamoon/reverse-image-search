@@ -85,7 +85,8 @@ def embed_image(image: Image.Image) -> List[float]:
 
 
 def save_image_locally(image: Image.Image, item_id: str) -> str:
-	fname = f"{item_id}_{uuid.uuid4().hex}.jpg"
+	safe_id = item_id.replace("/", "_").replace("\\", "_").replace(" ", "_")
+	fname = f"{safe_id}_{uuid.uuid4().hex}.jpg"
 	fpath = STORAGE_DIR / fname
 	image.save(fpath, format="JPEG", quality=90)
 	return str(fpath)

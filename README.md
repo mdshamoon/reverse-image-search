@@ -11,7 +11,7 @@ docker compose up --build
 # API available at http://localhost:8020
 ```
 
-Optional env vars (set in `docker-compose.yml` or shell):
+Optional env vars (set in `.env` or the shell; Compose interpolates them into the API container):
 - `IMAGE_SEARCH_API_KEY`: shared secret for ERPNext → API calls (omit for no auth)
 - `QDRANT_URL` (default `http://qdrant:6333`)
 - `QDRANT_COLLECTION` (default `items`)
@@ -20,8 +20,10 @@ Optional env vars (set in `docker-compose.yml` or shell):
 ## Endpoints
 
 - `GET /health` → `{status: "ok"}`
-- `POST /ingest` (multipart): `item_id` (required), `item_name?`, `item_code?`, `file` **or** `image_url`
-  - Returns `409` if `item_id` already exists
+- `POST /ingest` (multipart): `item_id` (required), `item_name?`, `item_code?`, `image_sha256?`, `replace?` (default `true`), `file` **or** `image_url`
+  - Atomically replaces the existing image when `item_id` is already indexed
+  - Returns `status: unchanged` without recomputing the embedding when `image_sha256` matches
+  - Set `replace=false` to ingest only when the Item is missing
 - `POST /search` (multipart): `top_k` (default 5), `file` **or** `image_url`
 - `DELETE /items/{item_id}` — deletes all Qdrant points and local image files for the given item_id (404 if not found)
 - `DELETE /items` — deletes ALL points from the collection and all files in `IMAGE_STORAGE_DIR`
@@ -96,8 +98,9 @@ scp -r ./reverse-image-search ec2-user@<EC2-IP>:/data/reverse-image-search
 # On the instance
 cd /data/reverse-image-search
 
+# Copy .env.example to .env and set IMAGE_SEARCH_API_KEY to a strong secret
+cp .env.example .env
 # Edit docker-compose.yml:
-#   - Set IMAGE_SEARCH_API_KEY to a strong secret
 #   - Set IMAGE_STORAGE_DIR=/data/images
 
 docker compose up --build -d

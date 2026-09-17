@@ -92,7 +92,7 @@ def save_image_locally(image: Image.Image, item_id: str) -> str:
 	return str(fpath)
 
 
-app = FastAPI(title="Image Reverse Search", version="0.2.0")
+app = FastAPI(title="Image Reverse Search", version="0.3.0")
 
 
 @app.on_event("startup")
@@ -112,6 +112,8 @@ def ingest(
 	item_id: str = Form(...),
 	item_name: Optional[str] = Form(None),
 	item_code: Optional[str] = Form(None),
+	image_sha256: Optional[str] = Form(None),
+	replace: bool = Form(True),
 	image_url: Optional[str] = Form(None),
 	file: Optional[UploadFile] = File(None),
 ) -> dict:
@@ -121,18 +123,37 @@ def ingest(
 	client = get_qdrant_client()
 	ensure_collection(client)
 
-	# Duplicate guard — check before loading/saving the image
+	# Find an existing entry before building the replacement. The new point is
+	# written first, then old points/files are removed, so a failed ingest leaves
+	# the last good image searchable.
 	existing, _ = client.scroll(
 		collection_name=COLLECTION_NAME,
 		scroll_filter=Filter(
 			must=[FieldCondition(key="item_id", match=MatchValue(value=item_id))]
 		),
-		limit=1,
-		with_payload=False,
+		limit=100,
+		with_payload=True,
 		with_vectors=False,
 	)
-	if existing:
-		raise HTTPException(status_code=409, detail="item_id already exists")
+	if existing and not replace:
+		existing_payload = existing[0].payload or {}
+		return {
+			"status": "existing",
+			"point_id": str(existing[0].id),
+			"image_path": existing_payload.get("image_path"),
+			"source_url": existing_payload.get("source_url"),
+			"replaced": False,
+		}
+	if image_sha256 and len(existing) == 1:
+		existing_payload = existing[0].payload or {}
+		if existing_payload.get("image_sha256") == image_sha256:
+			return {
+				"status": "unchanged",
+				"point_id": str(existing[0].id),
+				"image_path": existing_payload.get("image_path"),
+				"source_url": existing_payload.get("source_url"),
+				"replaced": False,
+			}
 
 	if file:
 		data = file.file.read()
@@ -143,22 +164,40 @@ def ingest(
 	saved_path = save_image_locally(image, item_id)
 	vector = embed_image(image)
 
-	point_id = uuid.uuid4().hex
+	point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{COLLECTION_NAME}:{item_id}"))
 	payload = {
 		"item_id": item_id,
 		"item_name": item_name,
 		"item_code": item_code,
+		"image_sha256": image_sha256,
 		"image_path": saved_path,
 		"source_url": image_url if image_url else saved_path,
 	}
 	point = PointStruct(id=point_id, vector=vector, payload=payload)
-	client.upsert(collection_name=COLLECTION_NAME, points=[point])
+	try:
+		client.upsert(collection_name=COLLECTION_NAME, points=[point])
+	except Exception:
+		Path(saved_path).unlink(missing_ok=True)
+		raise
+
+	old_points = [p for p in existing if str(p.id) != point_id]
+	if old_points:
+		client.delete(
+			collection_name=COLLECTION_NAME,
+			points_selector=[p.id for p in old_points],
+		)
+
+	for old_point in existing:
+		old_path = (old_point.payload or {}).get("image_path")
+		if old_path and old_path != saved_path:
+			Path(old_path).unlink(missing_ok=True)
 
 	return {
 		"status": "indexed",
 		"point_id": point_id,
 		"image_path": saved_path,
 		"source_url": image_url,
+		"replaced": bool(existing),
 	}
 
 
